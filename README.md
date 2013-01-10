@@ -1,7 +1,7 @@
 # folder2piwigo
 
 folder2piwigo is a script written in Python which facilitates the synchronization
-between a folder and a Piwigo.
+between a folder and [Piwigo](http://piwigo.org/).
 
 [Piwigo](http://piwigo.org/) is a famous open-source online photo gallery.
 folder2piwigo simplifies the synchronization between your local gallery (Digikam for example) and Piwigo. It provides features like:
@@ -13,4 +13,6 @@ folder2piwigo simplifies the synchronization between your local gallery (Digikam
 * ...
 
 For more details, please see:
-[Wiki](https://github.com/SvenWerlen/folder2piwigo/wiki)
+* [Wiki Home](https://github.com/SvenWerlen/folder2piwigo/wiki)
+* [Installation Guide](https://github.com/SvenWerlen/folder2piwigo/wiki/Installation)
+* [Frequently Asked Questions](https://github.com/SvenWerlen/folder2piwigo/wiki/FAQ)
