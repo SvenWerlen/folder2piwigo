@@ -14,5 +14,5 @@ folder2piwigo simplifies the synchronization between your local gallery (Digikam
 
 For more details, please see:
 * [Wiki Home](https://github.com/SvenWerlen/folder2piwigo/wiki)
-* [Installation Guide](https://github.com/SvenWerlen/folder2piwigo/wiki/Installation)
-* [Frequently Asked Questions](https://github.com/SvenWerlen/folder2piwigo/wiki/FAQ)
+* [Installation Guide](https://github.com/SvenWerlen/folder2piwigo/wiki/Installation-guide)
+* [Frequently Asked Questions](https://github.com/SvenWerlen/folder2piwigo/wiki/Frequently-asked-questions)
