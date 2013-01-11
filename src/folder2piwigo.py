@@ -154,7 +154,7 @@ class Folder2Piwigo(object):
                      elDone += 1
                   
                   # file is a video?
-                  elif fileext.lower() in [".ogv",".mp4"]:
+                  elif fileext.lower() in [".ogv",".ogg",".mp4"]:
                      print "    Processing video '" + outputFile + "'..."
                      
                      # create videos
@@ -193,7 +193,7 @@ class Folder2Piwigo(object):
                   
                   # check file extension
                   filename, fileext = os.path.splitext(elementPath)
-                  if not fileext.lower() in [".jpg",".jpeg",".gif",".png",".mp4",".ogv"]:
+                  if not fileext.lower() in [".jpg",".jpeg",".gif",".png",".mp4",".ogg"]:
                      continue
                   
                   # check if file was processed
@@ -260,7 +260,7 @@ class Folder2Piwigo(object):
       # folders
       thumbFolder = os.path.join(destFolder,'pwg_representative')
       tempThumb = os.path.join(self.tempFolder, 'temp.jpg')
-      tempVideo = os.path.join(self.tempFolder, 'vid.ogv')
+      tempVideo = os.path.join(self.tempFolder, 'vid.ogg')
       
       # create output folders if not exist
       if not os.path.exists(thumbFolder):
@@ -318,16 +318,18 @@ class Folder2Piwigo(object):
    # according to Piwigo restrictions
    # ===================================
    def utilFixPath(self, path):
+      path = path.lower()
       path = path.replace(" ", "_")
       path = path.replace("(", "")
       path = path.replace(")", "")
       path = path.replace(",", "")
       path = path.replace("&", "")
       path = path.replace("'", "")
+      path = path.replace(".ogv", ".ogg")
       
       nkfd_form = unicodedata.normalize('NFKD', unicode(path,'utf8'))
       path = u"".join([c for c in nkfd_form if not unicodedata.combining(c)])
-      return path.encode("ascii", "ignore").lower()
+      return path.encode("ascii", "ignore")
 
 
 
@@ -377,7 +379,7 @@ def main(argv):
    except getopt.GetoptError:
       usage()
    for opt, arg in opts:
-      if opt == '-h':
+      if opt in ("-h", "--help"):
          usage()
       elif opt in ("-c", "--config"):
          config = arg
