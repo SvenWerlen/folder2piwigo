@@ -7,7 +7,14 @@
 * @copyright 2012 Sven Werlen
 * @license GPL v3 (http://www.gnu.org/licenses/gpl.html)
 * @package folder2piwigo
-* @version 1.0 - 2013-01-08
+* @version 1.1 - 2013-01-13
+*
+* Contains
+*    AbstractPiwigoClient: client interface
+*    - PiwigoFileClient: file client implementation (FTP synchronization)
+*    - PiwigoAPIClient: api client implementation (web api)
+*    Folder2Piwigo: main class
+*    main(), usage(), etc...: a few global utility functions
 """
 
 import os
@@ -22,17 +29,20 @@ import json
 import requests
 from ConfigParser import SafeConfigParser
 
+# Global constants
+SCRIPTNAME = "folder2piwigo"
+VERSION = "1.1"
+
+
+
 
 # ===================================
 # Piwigo client interface
 # ===================================
 class AbstractPiwigoClient(object):
 
-   # target settings
-   target = None
-
-   def __init__(self,target):
-      self.target = target
+   def __init__(self,settings):
+      pass
 
    def categoryExists(self, category):
       r = requests.get(self.target, "")
@@ -44,10 +54,10 @@ class AbstractPiwigoClient(object):
    def fileExists(self, category, filename):
       pass
    
-   def addImage(self, file, category, filname):
+   def addImage(self, file, category, filename):
       pass
 
-   def addOther(self, file, representative, category, filname, ):
+   def addOther(self, file, representative, category, filename, ):
       pass
    
    def cleanCategory(self, category, fileList):
@@ -57,10 +67,27 @@ class AbstractPiwigoClient(object):
 
 # ===================================
 # ===================================
-# Pwigio file-based implementation
+# Piwigo file-based implementation
 # ===================================
 # ===================================
 class PiwigoFileClient(AbstractPiwigoClient):
+
+   # target folder
+   target = None
+   
+
+   def __init__(self,settings):
+      self.target = settings['targetFolder']
+      
+      # check that target folder exists
+      if self.target is None:
+         print "  [ERROR] No target folder specified!"
+         sys.exit(1)
+         
+      if not os.path.exists(self.target):
+         print "  [ERROR] Target folder '" + self.target + "' doesn't exist!"
+         sys.exit(1)
+         
 
    # Converts path according to Piwigo file restrictions
    def convertPath(self, path):
@@ -171,10 +198,13 @@ class PiwigoFileClient(AbstractPiwigoClient):
 
 # ===================================
 # ===================================
-# Pwigio api-based implementation
+# Piwigo api-based implementation
 # ===================================
 # ===================================
-class AbstractPiwigoClient(object):
+class APIPiwigoClient(object):
+
+   # enable traces
+   traces = False
 
    # target settings
    baseURL = None
@@ -184,11 +214,11 @@ class AbstractPiwigoClient(object):
    cacheCategoryId = None
    cacheCategory   = None
    cacheImages     = None
-
-
-   def __init__(self,target):
-      self.baseURL = target
-      data = {'username': 'admin', 'password': 'test123456'}
+         
+   def __init__(self, settings):
+      # settings don't have to be validated. Login would fail if they are correct.
+      self.baseURL = settings['serviceURL']
+      data = {'username': settings['username'], 'password': settings['password']}
       self.request('pwg.session.login', data)
 
    def __del__(self):
@@ -197,14 +227,17 @@ class AbstractPiwigoClient(object):
    # ===================================
    # Piwigo request to web API
    # ===================================
-   def request(self, method, content):
+   def request(self, method, content, files = None):
+      
       params = {'method': method, 'format': 'json'}
       cookies = dict(pwg_id=self.cookie) if not self.cookie is None else None
-      r = requests.post(self.baseURL + '/ws.php', params=params, data=content, cookies=cookies)
+      
+      r = requests.post(self.baseURL + '/ws.php', params=params, data=content, cookies=cookies, files=files)
       result = r.json
       
       # debug
-      print r.url
+      if self.traces:
+         print r.url
       
       # store cookie (1st time)
       if self.cookie is None:
@@ -314,16 +347,34 @@ class AbstractPiwigoClient(object):
       if categoryId is None:
          return False
       
-      #result = self.request('pwg.categories.getImages', {'cat_id': categoryId, 'per_page': {10000}})
-      #for i in result['images']
-         
-      return False
+      # retrieve images from cache or server
+      if self.cacheImages is None:
+         self.cacheImages = set([])
+         result = self.request('pwg.categories.getImages', {'cat_id': categoryId, 'per_page': {10000}})
+         # add all image names into cache
+         for i in result['images']['_content']:
+            self.cacheImages.add(i['name'])
+      
+      # check if filename is in cache (= image exists)
+      return filename in self.cacheImages
    
-   def addImage(self, file, category, filname):
-      donothing = True
+   
+   def addImage(self, file, category, filename):
+      
+      categoryId = self.getCategoryId(category) if self.categoryExists(category) else None
+      
+      # something whe
+      if categoryId is None:
+         print "  [WARN] Category '" + category + "' couln't be found! Skipping image '" + filename + "'..."
+         return
+      
+      options = {'category': categoryId, 'name': filename }
+      files = {'image': (filename, open(file, 'rb'))}
+      result = self.request('pwg.images.addSimple', options, files)
 
-   def addOther(self, file, representative, category, filname, ):
-      donothing = True
+
+   def addOther(self, file, representative, category, filename, ):
+      print "  [WARN] Videos are not yet supported by API implementation. Skipping '" + filename + "'..."
    
    def cleanCategory(self, category, fileList):
       return 0
@@ -332,6 +383,12 @@ class AbstractPiwigoClient(object):
 
 
 
+
+# =========================================================================================================
+# =========================================================================================================
+#                                           Main class
+# =========================================================================================================
+# =========================================================================================================
 class Folder2Piwigo(object):
    
    # settings
@@ -353,19 +410,24 @@ class Folder2Piwigo(object):
    # ===================================
    # Default constructor
    # ===================================
-   def __init__(self,sourceFolder,targetFolder,tempFolder,simulate,delete,resize,imageQuality,videoQuality):
+   def __init__(self,implementation,implSettings,sourceFolder,tempFolder,simulate,delete,resize,imageQuality,videoQuality):
       
+      self.client = None
       self.sourceFolder = sourceFolder
-      self.targetFolder = targetFolder
       self.tempFolder = tempFolder
       self.simulate = simulate
       self.delete = delete
       self.resize = resize
       self.imageQuality = imageQuality
       self.videoQuality = videoQuality
-      #self.client = PiwigoFileClient(targetFolder)
-      self.client = AbstractPiwigoClient("http://piwi.chummix.org/ws.php")
       
+      if implementation == 'file':
+         self.client = PiwigoFileClient(implSettings)
+      elif implementation == 'api':
+         self.client = APIPiwigoClient(implSettings)
+      else:
+         print "  [ERROR] Unknown implementation '" + implementation + "'!"
+         sys.exit(1)
                  
       # check that input folder exists
       if self.sourceFolder is None:
@@ -374,15 +436,6 @@ class Folder2Piwigo(object):
          
       if not os.path.exists(self.sourceFolder):
          print "  [ERROR] Input folder '" + self.sourceFolder + "' doesn't exist!"
-         sys.exit(1)
-
-      # check that target folder exists
-      if self.targetFolder is None:
-         print "  [ERROR] No target folder specified!"
-         sys.exit(1)
-      
-      if not os.path.exists(self.targetFolder):
-         print "  [ERROR] Target folder '" + self.targetFolder + "' doesn't exist!"
          sys.exit(1)
 
       # check that temp folder exists
@@ -609,9 +662,17 @@ def main(argv):
    
    config = None
    sourceFolder = None
-   targetFolder = None
    tempFolder = None
    simulate = None
+   
+   implementation = None
+   implSettings = [{}]
+   fileTargetFolder = None
+   apiServiceURL = None
+   apiUsername = None
+   apiPassword = None
+      
+   
    delete = None
    imgResize = None
    imgQuality = None
@@ -622,7 +683,7 @@ def main(argv):
     
    # read settings from command line options
    try:
-      opts, args = getopt.getopt(argv,"hdsi:o:t:c:",["config=","input=","output=","temp=","delete", "simulate"])
+      opts, args = getopt.getopt(argv,"hdsi:o:t:c:",["config=","input=","output=","temp=","delete", "simulate","version"])
       
    except getopt.GetoptError:
       usage()
@@ -634,13 +695,16 @@ def main(argv):
       elif opt in ("-i", "--input"):
          sourceFolder = arg
       elif opt in ("-o", "--output"):
-         targetFolder = arg
+         fileTargetFolder = arg
       elif opt in ("-t", "--temp"):
          tempFolder = arg
       elif opt in ("-d", "--delete"):
          delete = True
       elif opt in ("-s", "--simulate"):
          simulate = True
+      elif opt in ("--version"):
+         print SCRIPTNAME + " Version " + VERSION
+         sys.exit(0)
 
    # read config file and merge settings
    # (settings from command line have priority on settings from config file)
@@ -656,14 +720,21 @@ def main(argv):
       parser.read(config)
       
       # load settings if not already set
-      if parser.has_section('Folders'):
-         sourceFolder = parser.get('Folders', 'SourceFolder') if sourceFolder is None and parser.has_option('Folders','SourceFolder') else sourceFolder
-         targetFolder = parser.get('Folders', 'TargetFolder') if targetFolder is None and parser.has_option('Folders','TargetFolder') else targetFolder
-         tempFolder = parser.get('Folders', 'TempFolder') if tempFolder is None and parser.has_option('Folders','TempFolder') else tempFolder
+      if parser.has_section('File'):
+         fileTargetFolder = parser.get('File', 'TargetFolder') if fileTargetFolder is None and parser.has_option('File','TargetFolder') else fileTargetFolder
+      if parser.has_section('API'):
+         apiServiceURL = parser.get('API', 'ServiceURL') if apiServiceURL is None and parser.has_option('API','ServiceURL') else apiServiceURL
+         apiUsername = parser.get('API', 'Username') if apiUsername is None and parser.has_option('API','Username') else apiUsername
+         apiPassword = parser.get('API', 'Password') if apiPassword is None and parser.has_option('API','Password') else apiPassword         
       if parser.has_section('Settings'):
+         sourceFolder = parser.get('Settings', 'SourceFolder') if sourceFolder is None and parser.has_option('Settings','SourceFolder') else sourceFolder
+         tempFolder = parser.get('Settings', 'TempFolder') if tempFolder is None and parser.has_option('Settings','TempFolder') else tempFolder
          simulate = parser.getboolean('Settings', 'Simulate') if simulate is None and parser.has_option('Settings','Simulate') else simulate
          delete = parser.get('Settings', 'Delete') if delete is None and parser.has_option('Settings','Delete') else delete
          delete = False if delete == "Off" else delete
+         implementation = parser.get('Settings', 'Implementation') if implementation is None and parser.has_option('Settings','Implementation') else implementation
+         print implementation
+         implementation = implementation if implementation in ('file','api') else 'file'
       if parser.has_section('Images'):
          imgResize = parser.get('Images', 'Resize') if imgResize is None and parser.has_option('Images','Resize') else imgResize
          imgQuality = parser.getint('Images', 'Quality') if imgQuality is None and parser.has_option('Images','Quality') else imgQuality
@@ -675,11 +746,21 @@ def main(argv):
    delete = False if delete is None else delete
    imgQuality = 95 if imgQuality is None else imgQuality
    videoQuality = 5 if videoQuality is None else videoQuality
-    
+   
+   # load implementation settings
+   if implementation == "file":
+      implSettings = {"targetFolder": fileTargetFolder}
+   elif implementation == "api":
+      implSettings = {"serviceURL": apiServiceURL, "username": apiUsername, "password": apiPassword}
+   
    # print settings (debug)
    print '#################################'
+   print 'Implementation: ', implementation
    print 'Source folder:  ', sourceFolder
-   print 'Target folder:  ', targetFolder
+   if implementation == 'file':
+      print 'Target folder:  ', fileTargetFolder
+   elif implementation == 'api':
+      print 'Service URL:    ', apiServiceURL
    print 'Temp   folder:  ', tempFolder
    print 'Simulation Mode:', simulate
    print 'Deletion Mode:  ', delete
@@ -693,7 +774,7 @@ def main(argv):
       print "Please confirm by pressing ENTER or abort with CTRL+C"
       raw_input("")
          
-   p = Folder2Piwigo(sourceFolder,targetFolder,tempFolder,simulate,delete,imgResize,imgQuality,videoQuality)
+   p = Folder2Piwigo(implementation,implSettings,sourceFolder,tempFolder,simulate,delete,imgResize,imgQuality,videoQuality)
    p.run()
 
 
