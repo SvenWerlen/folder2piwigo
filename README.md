@@ -15,8 +15,8 @@ folder2piwigo simplifies the synchronization between your local gallery (Digikam
 How does it work?
 * You run the script from your machine
 * Depending on the selected implementation:
-** The script synchronizes your local albums with Piwigo (using FTP)
-** The script synchronizes your local albums with Piwigo (using the web API)
+ * The script synchronizes your local albums with Piwigo (using FTP)
+ * The script synchronizes your local albums with Piwigo (using the web API)
 * You use the "Admin | Synchronize" tool from Piwigo (only for FTP implementation)
 * Your online galleries are updated
 
