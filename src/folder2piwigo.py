@@ -18,7 +18,318 @@ import signal
 import shutil
 import re
 import time
+import json
+import requests
 from ConfigParser import SafeConfigParser
+
+
+# ===================================
+# Piwigo client interface
+# ===================================
+class AbstractPiwigoClient(object):
+
+   # target settings
+   target = None
+
+   def __init__(self,target):
+      self.target = target
+
+   def categoryExists(self, category):
+      r = requests.get(self.target, "")
+      pass
+
+   def addCategory(self, category):
+      pass
+
+   def fileExists(self, category, filename):
+      pass
+   
+   def addImage(self, file, category, filname):
+      pass
+
+   def addOther(self, file, representative, category, filname, ):
+      pass
+   
+   def cleanCategory(self, category, fileList):
+      pass
+
+
+
+# ===================================
+# ===================================
+# Pwigio file-based implementation
+# ===================================
+# ===================================
+class PiwigoFileClient(AbstractPiwigoClient):
+
+   # Converts path according to Piwigo file restrictions
+   def convertPath(self, path):
+      path = path.lower()
+      path = path.replace(" ", "_")
+      path = path.replace("(", "")
+      path = path.replace(")", "")
+      path = path.replace(",", "")
+      path = path.replace("&", "")
+      path = path.replace("'", "")
+      path = path.replace(".ogv", ".ogg")
+      
+      nkfd_form = unicodedata.normalize('NFKD', unicode(path,'utf8'))
+      path = u"".join([c for c in nkfd_form if not unicodedata.combining(c)])
+      return path.encode("ascii", "ignore")
+
+
+   def convertCategoryPath(self, path):
+      category = self.convertPath(path)
+      return os.path.join(self.target, category)
+
+   def convertFilePath(self, cPath, fPath):
+      category = self.convertCategoryPath(cPath)
+      file = self.convertPath(fPath)
+      return os.path.join(category,file)
+
+
+   def categoryExists(self, category):
+      return os.path.exists(self.convertCategoryPath(category))
+      
+   def addCategory(self, category):
+      os.mkdir(self.convertCategoryPath(category))
+
+   def fileExists(self, category, filename):
+      return os.path.exists(self.convertFilePath(category, filename))
+   
+   def addImage(self, file, category, filename):
+      shutil.copy(file, self.convertFilePath(category, filename))
+
+   def addOther(self, file, representative, category, filename):
+      # generate representative path and name
+      rFolder = os.path.join(category,'pwg_representative')
+      name, ext = os.path.splitext(filename)
+      rFilename = name + ".jpg"
+      
+      # treat representative folder like a category
+      if not self.categoryExists(rFolder):
+         self.addCategory(rFolder)
+      
+      tRepresentative = self.convertFilePath(rFolder, rFilename)
+      tFile = self.convertFilePath(category, filename)
+      
+      # copy files
+      try:
+         shutil.copy(representative, tRepresentative)
+         shutil.copy(file, tFile)
+      except IOError:
+         # could happen with big files
+         # check if file size is the same => if not, remove target file
+         statinfo1 = os.stat(representative)
+         statinfo2 = os.stat(tRepresentative)
+         if not statinfo1.st_size == statinfo2.st_size:
+            os.remove(tRepresentative)
+         statinfo1 = os.stat(file)
+         statinfo2 = os.stat(tFile)
+         if not statinfo1.st_size == statinfo2.st_size:
+            os.remove(tFile)
+         
+         
+
+   def cleanCategory(self, category, fileList, prompt):
+      # generate a new list (filename converted)
+      newFileList = set([])
+      for f in fileList:
+         newFileList.add(self.convertPath(f))
+         
+      # delete
+      deleted = 0
+      for el in os.listdir(self.convertCategoryPath(category)):
+         curPath = self.convertFilePath(category, el)
+         
+         # ignore system files
+         if el.startswith("."):
+            continue
+         
+         # check file extension
+         name, ext = os.path.splitext(curPath)
+         if not ext.lower() in [".jpg",".jpeg",".gif",".png",".mp4",".ogg"]:
+            continue
+            
+         # check if file was processed
+         if not el in newFileList:
+            print "    Element '" + el + "' has no match in source folder. Deleting..."
+            
+            # delete file
+            delCommand = 'rm -f #INTERACTIVE "#SRCFILE"'
+            delCommand = delCommand.replace('#INTERACTIVE','-i') if prompt else delCommand.replace('#INTERACTIVE','')
+            delCommand = delCommand.replace('#SRCFILE',self.convertFilePath(category, el))
+            os.system(delCommand)
+
+            # increase counter
+            deleted += 1
+     
+      return deleted
+                     
+
+
+
+# ===================================
+# ===================================
+# Pwigio api-based implementation
+# ===================================
+# ===================================
+class AbstractPiwigoClient(object):
+
+   # target settings
+   baseURL = None
+   cookie = None
+   
+   # cache
+   cacheCategoryId = None
+   cacheCategory   = None
+   cacheImages     = None
+
+
+   def __init__(self,target):
+      self.baseURL = target
+      data = {'username': 'admin', 'password': 'test123456'}
+      self.request('pwg.session.login', data)
+
+   def __del__(self):
+      self.request('pwg.session.logout', {})
+
+   # ===================================
+   # Piwigo request to web API
+   # ===================================
+   def request(self, method, content):
+      params = {'method': method, 'format': 'json'}
+      cookies = dict(pwg_id=self.cookie) if not self.cookie is None else None
+      r = requests.post(self.baseURL + '/ws.php', params=params, data=content, cookies=cookies)
+      result = r.json
+      
+      # debug
+      print r.url
+      
+      # store cookie (1st time)
+      if self.cookie is None:
+         self.cookie = r.cookies['pwg_id']
+      
+      if result is None:
+         # strange: logout doesn't return any result??
+         if not method == 'pwg.session.logout':
+            print "  [ERROR] Communication error (empty result)"
+            sys.exit(1)
+      elif result['stat'] == 'ok':
+         return result['result']
+      else:
+         print "  [ERROR] Communication error [" + str(result['err']) + "]: " + result['message']
+         sys.exit(1)
+   
+   # ===================================
+   # Retrieves categoryId from path
+   # ===================================
+   def getCategoryId(self, category):
+      # check cache
+      if self.cacheCategory == category:
+         return self.cacheCategoryId
+      
+      if category == "":
+         return None
+      
+      # remove first '/'
+      if category.startswith('/'):
+         category = category[1:]
+      
+      categories = category.split('/')
+      cur = 0
+      found = False
+
+      for cat in categories:
+         result = self.request('pwg.categories.getList', {'cat_id': cur})
+         for c in result['categories']:
+            # current category found
+            if c['name'].encode('utf-8') == cat:
+               cur = c['id']
+               found = True
+         
+         if not found:
+            return None
+         
+      return cur if found else None
+         
+   
+   # ===================================
+   # Retrieves parentCategoryId from path
+   # ===================================
+   def getParentCategoryId(self, category):
+      # remove last part
+      parentCategory = category[:category.rfind('/')]
+      return getCategoryId(parentCategory)
+      
+
+   def categoryExists(self, category):
+      # check cache
+      if self.cacheCategory == category:
+         return True
+      
+      # root category always exists
+      if category == "":
+         return True
+         
+      catId = self.getCategoryId(category)
+      if catId is None:
+         return False
+         
+      # update cache
+      self.cacheCategoryId = catId
+      self.cacheCategory = category
+      self.cacheImages = None
+      return True
+      
+
+   def addCategory(self, category):
+      index = category.rfind('/')
+      parentCategory = "" if index < 0 else category[:category.rfind('/')]
+      parentCategoryId = "" if index < 0 else self.getCategoryId(parentCategory)
+      currentCategory = category if index < 0 else category[category.rfind('/')+1:]
+      
+      print "Parent = " + parentCategory
+      print "Current = " + currentCategory
+      
+      # ignore root category
+      if currentCategory == "":
+         return
+      
+      params = {}
+      if parentCategoryId is None:
+         params = {'name': currentCategory}
+      else:
+         params = {'name': currentCategory,'parent': str(parentCategoryId)}
+      
+      # create new album
+      self.request('pwg.categories.add', params)
+      
+      
+
+   def fileExists(self, category, filename):
+      
+      categoryId = self.getCategoryId(category) if self.categoryExists(category) else None
+      
+      if categoryId is None:
+         return False
+      
+      #result = self.request('pwg.categories.getImages', {'cat_id': categoryId, 'per_page': {10000}})
+      #for i in result['images']
+         
+      return False
+   
+   def addImage(self, file, category, filname):
+      donothing = True
+
+   def addOther(self, file, representative, category, filname, ):
+      donothing = True
+   
+   def cleanCategory(self, category, fileList):
+      return 0
+
+
+
 
 
 class Folder2Piwigo(object):
@@ -36,6 +347,8 @@ class Folder2Piwigo(object):
    
    videoQuality = None
    
+   client = None
+   
    
    # ===================================
    # Default constructor
@@ -50,6 +363,9 @@ class Folder2Piwigo(object):
       self.resize = resize
       self.imageQuality = imageQuality
       self.videoQuality = videoQuality
+      #self.client = PiwigoFileClient(targetFolder)
+      self.client = AbstractPiwigoClient("http://piwi.chummix.org/ws.php")
+      
                  
       # check that input folder exists
       if self.sourceFolder is None:
@@ -104,15 +420,13 @@ class Folder2Piwigo(object):
          return
 
       # build output folder path
-      outputDir = curFolder.replace(self.sourceFolder,"")
-      outputDir = self.targetFolder + self.utilFixPath(outputDir)   
+      category = curFolder.replace(self.sourceFolder,"")
       
       # create output folder if not exist
-      if not os.path.exists(outputDir):
-         print "    Folder '" + outputDir + "' doesn't exist. Creating..."
+      if not self.client.categoryExists(category):
+         print "    Category '" + category + "' doesn't exist. Creating..."
          if not self.simulate:
-            os.mkdir(outputDir)
-
+            self.client.addCategory(category)
       
       # loop over all elements
       processed = set([])
@@ -130,36 +444,34 @@ class Folder2Piwigo(object):
             # file => process image
             if os.path.isfile(curPath):
                # add element into set (necessary for --delete option)
-               processed.add(self.utilFixPath(el))
+               processed.add(el)
                
                # retrieve relative paths
-               elementPath  = curPath
-               outputFile = os.path.join(outputDir, el)
-               outputFile = self.utilFixPath(outputFile)
+               filePath  = curPath
                
                # check if file exists
-               if not os.path.exists(outputFile):
+               if not self.client.fileExists(category, el):
                
                   # file is an image?
-                  filename, fileext = os.path.splitext(outputFile)
+                  filename, fileext = os.path.splitext(el)
                   if fileext.lower() in [".jpg",".jpeg",".gif",".png"]:
-                     nothing = True
-                     print "    Processing image '" + outputFile + "'..."
+                     print "    Processing image '" + el + "'..."
                                        
                      # create images
                      if not self.simulate:
-                        self.createImage(elementPath, outputFile)
+                        self.client.addImage(self.createImage(filePath), category, el)
                      
                      # increase counter
                      elDone += 1
                   
                   # file is a video?
                   elif fileext.lower() in [".ogv",".ogg",".mp4"]:
-                     print "    Processing video '" + outputFile + "'..."
+                     print "    Processing video '" + el + "'..."
                      
                      # create videos
                      if not self.simulate:
-                        self.createVideo(elementPath, self.utilFixPath(el), outputDir, outputFile)
+                        video, thumb = self.createVideo(filePath)
+                        self.client.addOther(video, thumb, category, el)
                      
                      # increase counter
                      elDone += 1
@@ -177,41 +489,9 @@ class Folder2Piwigo(object):
 
 
       # delete non-processed elements
-      if self.delete  and os.path.exists(outputDir) and os.path.isdir(outputDir):
-         for el in os.listdir(outputDir):
-            try:
-               curPath = os.path.join(outputDir,el)
-               
-               # ignore system files
-               if el.startswith("."):
-                  continue
-               
-               # file => check image
-               if os.path.isfile(curPath):
-                  # retrieve relative paths
-                  elementPath  = curPath
-                  
-                  # check file extension
-                  filename, fileext = os.path.splitext(elementPath)
-                  if not fileext.lower() in [".jpg",".jpeg",".gif",".png",".mp4",".ogg"]:
-                     continue
-                  
-                  # check if file was processed
-                  if not el in processed:
-                     print "    Element '" + elementPath + "' has no match in source folder. Deleting..."
-                     
-                     # delete file
-                     if not self.simulate:
-                        delCommand = 'rm -f #INTERACTIVE "#SRCFILE"'
-                        delCommand = delCommand.replace('#INTERACTIVE','-i') if self.delete == "Prompt" else delCommand.replace('#INTERACTIVE','')
-                        delCommand = delCommand.replace('#SRCFILE',elementPath)
-                        os.system(delCommand)
-
-                     # increase counter
-                     elDeleted += 1            
-                     
-            except KeyboardInterrupt:
-               quit_gracefully()
+      if self.delete and os.path.exists(curFolder) and os.path.isdir(curFolder):
+         if not self.simulate:
+            elDeleted = self.client.cleanCategory(category, processed, self.delete == "Prompt")
          
       # verbose
       print "    (" + str(elDone) + " elements processed / " + str(elSkipped) + " elements skipped / " + str(elDeleted) + " elements deleted)"
@@ -223,7 +503,7 @@ class Folder2Piwigo(object):
    #  - Applies desired quality
    #  - Resizes image (if desired)
    # ===================================
-   def createImage(self, srcFile, destFile):
+   def createImage(self, srcFile):
 
       # temporary file
       tempfile = os.path.join(self.tempFolder, 'temp.jpg')
@@ -240,8 +520,7 @@ class Folder2Piwigo(object):
       # execute command
       os.system(imCommand)
       
-      # copy to destination
-      shutil.copy(tempfile, destFile)
+      return tempfile
    
    
    # ===================================
@@ -252,19 +531,11 @@ class Folder2Piwigo(object):
    #  - Extracts an image from the video as representative
    #  - Adds EXIF date to representative
    # ===================================
-   def createVideo(self, srcFile, filename, destFolder, destFile):
+   def createVideo(self, srcFile):
          
-      # extract filename
-      filename, fileext = os.path.splitext(filename)
-      
       # folders
-      thumbFolder = os.path.join(destFolder,'pwg_representative')
       tempThumb = os.path.join(self.tempFolder, 'temp.jpg')
       tempVideo = os.path.join(self.tempFolder, 'vid.ogg')
-      
-      # create output folders if not exist
-      if not os.path.exists(thumbFolder):
-         os.mkdir(thumbFolder)
       
       # commands
       thumbCommand = 'avconv -y -i "#SRCFILE" -vframes 1 -ss 00:00:01 -an -vcodec mjpeg -f rawvideo -v quiet "#DESTFILE"';
@@ -283,18 +554,14 @@ class Folder2Piwigo(object):
       os.system(vidCommand)
       
       # extract creation date 
-      createDate = self.utilExtractTime(filename)
+      createDate = self.utilExtractTime(srcFile)
       
       # inject exif metadata
       exifCommand = exifCommand.replace('#SRCFILE',tempThumb)
       exifCommand = exifCommand.replace('#DATE',createDate)
       os.system(exifCommand)
 
-      # copy thumbnails
-      shutil.copy(tempThumb, os.path.join(thumbFolder,filename + '.jpg'))
-
-      # copy video to destination
-      shutil.copy(tempVideo, destFile)
+      return tempVideo, tempThumb
       
       
 
@@ -311,26 +578,6 @@ class Folder2Piwigo(object):
          date = search.group(1)
          date = time.strptime(date,'%Y%m%d_%H%M%S')
          return time.strftime("%Y:%m:%d %H:%M:%S", date)
-   
-
-   # ===================================
-   # Utility function that applies some rules on paths
-   # according to Piwigo restrictions
-   # ===================================
-   def utilFixPath(self, path):
-      path = path.lower()
-      path = path.replace(" ", "_")
-      path = path.replace("(", "")
-      path = path.replace(")", "")
-      path = path.replace(",", "")
-      path = path.replace("&", "")
-      path = path.replace("'", "")
-      path = path.replace(".ogv", ".ogg")
-      
-      nkfd_form = unicodedata.normalize('NFKD', unicode(path,'utf8'))
-      path = u"".join([c for c in nkfd_form if not unicodedata.combining(c)])
-      return path.encode("ascii", "ignore")
-
 
 
 # ===============================================================================================
@@ -345,7 +592,7 @@ class Folder2Piwigo(object):
 # Prints the script usage and exists
 # ===================================
 def usage():
-   print 'folder2piwigo4.py -i <inputfolder> [-o <outputfolder>] [--delete] [--simulate]'
+   print 'folder2piwigo.py -i <inputfolder> [-o <outputfolder>] [--delete] [--simulate]'
    sys.exit(2)
 
 # ===================================
@@ -359,6 +606,7 @@ def quit_gracefully(*args):
 # Main
 # ===================================
 def main(argv):
+   
    config = None
    sourceFolder = None
    targetFolder = None
